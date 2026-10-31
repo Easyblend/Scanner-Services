@@ -31,6 +31,7 @@ export async function startScanWorker() {
             console.log(
                 `Starting scan: ${job.scanId}`
             );
+            const startTime = new Date().toISOString();
 
             const result = await scanWebsite(job.url);
 
@@ -51,7 +52,7 @@ export async function startScanWorker() {
                         scanId: job.scanId,
                         projectId: job.projectId,
                         success: true,
-
+                        startedAt: startTime,
                         pagesScanned: result.pagesScanned,
                         findings: result.findings,
                     }),
