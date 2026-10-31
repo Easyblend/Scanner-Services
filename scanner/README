@@ -1,0 +1,27 @@
+
+
+
+## Useful Commands
+
+#### Build + Push
+- ddocker buildx build \
+  --platform linux/amd64 \
+  --provenance=false \
+  -t crowdtestscanneremmanuel.azurecr.io/crowdtest-scanner:<vx.x.x> \
+  --push .
+  
+#### Deploy that exact version
+- az containerapp update \
+  --name crowdtest-scanner \
+  --resource-group crowdtest-scanner-rg \
+  --image crowdtestscanneremmanuel.azurecr.io/crowdtest-scanner:<vx.x.x>
+
+
+  ## Wire env secrets to azure secrets
+  - az containerapp update \
+  --name crowdtest-scanner \
+  --resource-group crowdtest-scanner-rg \
+  --set-env-vars \
+    RABBITMQ_URL=secretref:rabbitmq-url \
+    NEXT_APP_URL=secretref:next-app-url \
+    SCANNER_API_KEY=secretref:scanner-secret
