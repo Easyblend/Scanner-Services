@@ -1,23 +1,24 @@
 import amqp from "amqplib";
 import { scanWebsite } from "../scanner/scanner";
 import type { ScanRequested } from "./scan-message";
+import "dotenv/config";
 
 const REQUEST_QUEUE = "scan-requests";
-const RESULT_QUEUE = "scan-results";
 
 export async function startScanWorker() {
-    const connection = await amqp.connect("");
+    const connection = await amqp.connect(
+        process.env.RABBITMQ_URL!
+    );
+
     const channel = await connection.createChannel();
 
     await channel.assertQueue(REQUEST_QUEUE, {
         durable: true,
     });
 
-    await channel.assertQueue(RESULT_QUEUE, {
-        durable: true,
-    });
-
-    console.log(`Waiting for messages on ${REQUEST_QUEUE}...`);
+    console.log(
+        `Waiting for messages on ${REQUEST_QUEUE}...`
+    );
 
     channel.consume(REQUEST_QUEUE, async (message) => {
         if (!message) return;
@@ -27,48 +28,80 @@ export async function startScanWorker() {
         );
 
         try {
-
-            console.log(`Starting scan: ${job.scanId}`);
+            console.log(
+                `Starting scan: ${job.scanId}`
+            );
 
             const result = await scanWebsite(job.url);
 
-            await channel.sendToQueue(
-                RESULT_QUEUE,
-                Buffer.from(
-                    JSON.stringify({
+            console.log(
+                `Scan result for ${job.scanId}:`,
+                result
+            );
+
+            const response = await fetch(
+                `${process.env.NEXT_APP_URL}/api/internal/scans/result`,
+                {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${process.env.SCANNER_API_KEY}`,
+                    },
+                    body: JSON.stringify({
                         scanId: job.scanId,
                         projectId: job.projectId,
                         success: true,
-                        ...result,
-                    })
-                ),
-                {
-                    persistent: true,
+
+                        pagesScanned: result.pagesScanned,
+                        findings: result.findings,
+                    }),
                 }
             );
+
+            if (!response.ok) {
+                throw new Error(
+                    `Failed to send scan result: ${response.status}`
+                );
+            }
 
             channel.ack(message);
 
-            console.log(`Scan completed: ${job.scanId}`);
-        } catch (error) {
-            console.error("Error processing scan request:", error);
-            await channel.sendToQueue(
-                RESULT_QUEUE,
-                Buffer.from(
-                    JSON.stringify({
-                        scanId: job.scanId,
-                        projectId: job.projectId,
-                        success: false,
-                        error: error instanceof Error
-                            ? error.message
-                            : "Unknown scan error",
-                    })
-                ),
-                {
-                    persistent: true,
-                    contentType: "application/json",
-                }
+            console.log(
+                `Scan completed: ${job.scanId}`
             );
+        } catch (error) {
+            console.error(
+                `Error processing scan ${job.scanId}:`,
+                error
+            );
+
+            try {
+                await fetch(
+                    `${process.env.NEXT_APP_URL}/api/internal/scans/result`,
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type":
+                                "application/json",
+                            Authorization: `Bearer ${process.env.SCANNER_API_KEY}`,
+                        },
+                        body: JSON.stringify({
+                            scanId: job.scanId,
+                            projectId: job.projectId,
+                            success: false,
+                            error:
+                                error instanceof Error
+                                    ? error.message
+                                    : "Unknown scan error",
+                        }),
+                    }
+                );
+            } catch (resultError) {
+                console.error(
+                    "Failed to send scan failure result:",
+                    resultError
+                );
+            }
 
             channel.ack(message);
         }
