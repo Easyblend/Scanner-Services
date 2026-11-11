@@ -1,61 +1,78 @@
 # Crowdtest Scanner
 
-A background worker that scans websites requested by the Crowdtest app. It reads jobs from RabbitMQ and sends scan results back to the app.
+Crowdtest Scanner is a background worker for checking websites submitted by the Crowdtest app. It gets scan jobs from RabbitMQ, opens the site in a headless Chromium browser, and sends the results back to the app.
 
-## How It Works
+It is a worker, not a user-facing website. Its HTTP server currently provides a health endpoint only.
 
-```mermaid
-flowchart LR
-    App[Crowdtest app] -->|scan request| Queue[(RabbitMQ<br/>scan-requests)]
-    Queue -->|JSON job| Worker[Scanner worker]
-    Worker -->|crawl pages| Website[Target website]
-    Worker -->|scan result| App
-```
+## What It Checks
 
-1. The app publishes a job to the durable `scan-requests` queue.
-2. The scanner reads the job and scans its URL.
-3. The scanner POSTs success or failure to the app's result endpoint.
+For each job, the scanner crawls up to 10 pages on the starting site's origin and collects:
+
+- Unhandled JavaScript errors.
+- Failed same-origin network requests and HTTP responses with an error status.
+- Internal links that cannot be reached or return an error status.
+
+Findings include a category, severity, confidence, page URL, description, and available request or error details. Duplicate findings are removed before results are sent. Third-party network errors and external links are not checked.
+
+## How A Scan Works
+
+1. The Crowdtest app publishes a job to the durable RabbitMQ queue `scan-requests`.
+2. The worker scans the job's URL using Chromium.
+3. The worker posts a success or failure result to the app.
+4. The worker acknowledges the RabbitMQ message after processing.
 
 ## Run Locally
 
-Requirements: Node.js 22+, a reachable RabbitMQ instance, and the app's result endpoint.
+You need Node.js 22 or later, a reachable RabbitMQ instance, and a Crowdtest app endpoint that accepts scan results.
 
-1. Install dependencies:
+Install the scanner's dependencies:
 
-   ```sh
-   npm install
-   ```
+```sh
+cd scanner
+npm install
+```
 
-2. Create a `.env` file in the project root:
+Create `scanner/.env` with values for your local services:
 
-   ```dotenv
-   RABBITMQ_URL=amqp://localhost
-   NEXT_APP_URL=http://localhost:3000
-   SCANNER_API_KEY=replace-with-local-api-key
-   PORT=8080
-   ```
+```dotenv
+RABBITMQ_URL=amqp://localhost
+NEXT_APP_URL=http://localhost:3000
+SCANNER_API_KEY=your-local-api-key
+PORT=8080
+```
 
-   `NEXT_APP_URL` is the base URL of the app that accepts scan results. The API key must be accepted by that app.
+`NEXT_APP_URL` is the base URL of the Crowdtest app. `SCANNER_API_KEY` must be accepted by its result endpoint. `PORT` is optional and defaults to `8080`.
 
-3. Start the worker:
+Start the worker from the `scanner` directory:
 
-   ```sh
-   npm run dev
-   ```
+```sh
+npm run dev
+```
 
-4. Check that the HTTP health endpoint responds:
+In another terminal, check its health endpoint:
 
-   ```sh
-   curl http://localhost:8080/health
-   ```
+```sh
+curl http://localhost:8080/health
+```
 
-   Expected response: `{"status":"ok","service":"crowdtest-scanner"}`.
+Expected response:
 
-The worker connects to RabbitMQ before it starts listening on `PORT` (default `8080`). If RabbitMQ is unavailable or `RABBITMQ_URL` is missing, startup fails.
+```json
+{"status":"ok","service":"crowdtest-scanner"}
+```
 
-## Queue Message
+The worker connects to RabbitMQ before the health endpoint starts listening. Startup exits with an error if it cannot connect.
 
-Publish a JSON message like this to `scan-requests`:
+To compile the TypeScript or run the compiled worker:
+
+```sh
+npm run build
+npm start
+```
+
+## RabbitMQ Message
+
+The producer publishes JSON to `scan-requests` with this shape:
 
 ```json
 {
@@ -67,27 +84,33 @@ Publish a JSON message like this to `scan-requests`:
 }
 ```
 
-The producer should include all five fields. The scanner uses `scanId`, `projectId`, and `url`; `eventId` and `requestedAt` are part of the message contract.
+All five fields are part of the message contract. The worker currently uses `scanId`, `projectId`, and `url`; `eventId` and `requestedAt` are not used during scanning.
 
-## Result Flow
+## Results Sent To The App
 
-```mermaid
-sequenceDiagram
-    participant Q as RabbitMQ
-    participant S as Scanner
-    participant A as Crowdtest app
-    Q->>S: scan-requests message
-    S->>S: Scan URL and collect findings
-    S->>A: POST /api/internal/scans/result (success or failure)
-    A-->>S: HTTP response
-    S->>Q: Acknowledge message
+The worker sends results to:
+
+```text
+POST {NEXT_APP_URL}/api/internal/scans/result
+Authorization: Bearer {SCANNER_API_KEY}
 ```
 
-Successful scans send `scanId`, `projectId`, `success`, `startedAt`, `pagesScanned`, and `findings` to `POST {NEXT_APP_URL}/api/internal/scans/result`. Failed scans send `scanId`, `projectId`, `success: false`, and an error message. The request uses `Authorization: Bearer {SCANNER_API_KEY}`.
+A successful scan includes `scanId`, `projectId`, `success: true`, `startedAt`, `pagesScanned`, and `findings`. A failed scan includes `scanId`, `projectId`, `success: false`, and an error message.
 
-## Build and Deploy
+## Project Layout
 
-Set a release version, then build and push the image for Azure Container Apps:
+```text
+scanner/
+  src/server.ts                 HTTP health endpoint and worker startup
+  src/messaging/                RabbitMQ consumer and job contract
+  src/scanner/crawler.ts        Chromium crawl, limited to 10 pages
+  src/scanner/checks/           JavaScript, network, and link checks
+  src/scanner/findings/         Finding types, classification, deduplication
+```
+
+## Build And Deploy
+
+The Dockerfile is in `scanner/`. From the repository root, build and push an image for Azure Container Apps:
 
 ```sh
 VERSION=v1.0.0
@@ -97,10 +120,10 @@ docker buildx build \
   --platform linux/amd64 \
   --provenance=false \
   -t "$IMAGE" \
-  --push .
+  --push scanner
 ```
 
-Deploy that same image version:
+Deploy the same image version:
 
 ```sh
 az containerapp update \
@@ -109,7 +132,7 @@ az containerapp update \
   --image "$IMAGE"
 ```
 
-Configure these values as secrets on the Container App: `rabbitmq-url`, `next-app-url`, and `scanner-secret`. Then map them to the worker's environment variables:
+Configure the Container App secrets `rabbitmq-url`, `next-app-url`, and `scanner-secret`, then map them to the worker environment:
 
 ```sh
 az containerapp update \
@@ -119,38 +142,4 @@ az containerapp update \
     RABBITMQ_URL=secretref:rabbitmq-url \
     NEXT_APP_URL=secretref:next-app-url \
     SCANNER_API_KEY=secretref:scanner-secret
-```
-
-
-
-
-
-## Useful Commands
-
-#### Build + Push
-```
-- ddocker buildx build \
-  --platform linux/amd64 \
-  --provenance=false \
-  -t crowdtestscanneremmanuel.azurecr.io/crowdtest-scanner:<vx.x.x> \
-  --push .
   ```
-  
-#### Deploy that exact version
-```
-- az containerapp update \
-  --name crowdtest-scanner \
-  --resource-group crowdtest-scanner-rg \
-  --image crowdtestscanneremmanuel.azurecr.io/crowdtest-scanner:<vx.x.x>
-```
-
-  ## Wire env secrets to azure secrets
-  ```
-  - az containerapp update \
-  --name crowdtest-scanner \
-  --resource-group crowdtest-scanner-rg \
-  --set-env-vars \
-    RABBITMQ_URL=secretref:rabbitmq-url \
-    NEXT_APP_URL=secretref:next-app-url \
-    SCANNER_API_KEY=secretref:scanner-secret
-    ```
