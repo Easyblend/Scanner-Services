@@ -8,6 +8,14 @@ app.get("/health", (_req, res) => {
   res.json({
     status: "ok",
     service: "crowdtest-scanner",
+    "uptime": process.uptime(),
+    "timestamp": new Date().toISOString(),
+    "pid": process.pid,
+    "node_version": process.version,
+    "platform": process.platform,
+    "arch": process.arch,
+    "memory_usage": process.memoryUsage(),
+    "cpu_usage": process.cpuUsage(),
   });
 });
 
