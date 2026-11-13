@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "test": "tsx --test src/scanner/*.test.ts src/scanner/findings/*.test.ts",
     "build": "tsc",
     "start": "node dist/server.js"
   },
